@@ -1,0 +1,35 @@
+[project]
+name = "doubaoime-asr"
+version = "0.1.0"
+description = "豆包输入法 ASR"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "miniaudio>=1.61",
+    "opuslib>=3.0.1",
+    "protobuf>=6.33.5",
+    "pydantic>=2.12.5",
+    "requests>=2.32.5",
+    "websockets>=12.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "grpcio-tools>=1.70",
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+]
+examples = [
+    "sounddevice>=0.5.0",
+    "numpy>=2.0.0",
+]
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["."]
+
+[tool.setuptools.package-data]
+doubaoime_asr = ["*.pyi", "*.proto"]
