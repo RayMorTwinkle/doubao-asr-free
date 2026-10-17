@@ -1,0 +1,35 @@
+<svg viewBox="0 0 512 512" xmlns="http://www.w3.org/2000/svg">
+  <title>doubao-asr-free</title>
+  <defs>
+    <!-- Doubao-style blue → cyan gradient background -->
+    <linearGradient id="bg-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#3D6BFE" />
+      <stop offset="100%" stop-color="#1FC2F5" />
+    </linearGradient>
+    <!-- Subtle top gloss -->
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#FFFFFF" stop-opacity="0.18" />
+      <stop offset="45%" stop-color="#FFFFFF" stop-opacity="0" />
+    </linearGradient>
+    <filter id="drop" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="10" stdDeviation="14" flood-color="#0B2E7A" flood-opacity="0.35" />
+    </filter>
+  </defs>
+
+  <!-- Rounded-square base plate (visible on light and dark backgrounds) -->
+  <rect x="24" y="24" width="464" height="464" rx="104" fill="url(#bg-grad)" filter="url(#drop)" />
+  <rect x="24" y="24" width="464" height="464" rx="104" fill="url(#gloss)" />
+  <rect x="25" y="25" width="462" height="462" rx="103" fill="none" stroke="#FFFFFF" stroke-opacity="0.08" stroke-width="2" />
+
+  <!-- Core metaphor: a live speech waveform collapsing into a single line of text -->
+  <g fill="#FFFFFF">
+    <!-- waveform bars, symmetric around the vertical midline -->
+    <rect x="126" y="186" width="36" height="140" rx="18" fill-opacity="0.85" />
+    <rect x="186" y="146" width="36" height="220" rx="18" />
+    <rect x="246" y="106" width="36" height="300" rx="18" />
+    <rect x="306" y="146" width="36" height="220" rx="18" />
+    <rect x="366" y="186" width="36" height="140" rx="18" fill-opacity="0.85" />
+    <!-- "text line" the speech resolves into -->
+    <rect x="126" y="434" width="276" height="24" rx="12" fill-opacity="0.9" />
+  </g>
+</svg>
