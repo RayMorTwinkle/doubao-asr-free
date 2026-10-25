@@ -30,6 +30,9 @@ class ResponseType(Enum):
     SESSION_FINISHED = auto()
     VAD_START = auto()
     INTERIM_RESULT = auto()
+    # 两遍解码阶段性确认：is_interim=false 但未断句（无 vad_finished）。
+    # 之后同句还会继续出中间结果，不能当句子结束（实测见 docs/FINDINGS.md）。
+    TWO_PASS_RESULT = auto()
     FINAL_RESULT = auto()
     HEARTBEAT = auto()
     ERROR = auto()
@@ -46,6 +49,11 @@ class ASRResponse:
     is_final: bool = False
     vad_start: bool = False
     vad_finished: bool = False
+    # 本条为两遍解码确认文本（尚未断句，文本是该句已确认前缀）
+    two_pass: bool = False
+    # 服务器已消费音频毫秒数：唯一可靠的进度信号（服务端时间戳不可靠，
+    # 见 docs/FINDINGS.md）；无该字段时为 -1
+    audio_duration_ms: int = -1
     packet_number: int = -1
     error_msg: str = ""
     raw_json: Optional[dict] = None
@@ -90,17 +98,28 @@ class DoubaoASR:
 
         :param audio: 音频文件路径或 PCM 字节数据
         :param on_interim: 可选的中间结果回调
-        :return: 最终识别文本
+        :return: 最终识别文本（全部句子合并；FINAL 权威 + 中间结果断句兜底）
         """
-        final_text = ""
+        parts: List[str] = []
+        cur = ""
         async for response in self.transcribe_stream(audio, realtime=realtime):
-            if response.type == ResponseType.INTERIM_RESULT and on_interim:
-                on_interim(response.text)
-            elif response.type == ResponseType.FINAL_RESULT:
-                final_text = response.text
-            elif response.type == ResponseType.ERROR:
+            if response.type == ResponseType.ERROR:
                 raise ASRError(response.error_msg, response)
-        return final_text
+            elif response.type == ResponseType.FINAL_RESULT:
+                if response.text:
+                    parts.append(response.text)
+                cur = ""  # 断句定稿（或 VAD 判空），当前句结束
+            elif response.type in (ResponseType.INTERIM_RESULT, ResponseType.TWO_PASS_RESULT):
+                if on_interim and response.type == ResponseType.INTERIM_RESULT:
+                    on_interim(response.text)
+                if response.text:
+                    # 文本长度大幅缩水 = 新句开始，旧句以最后中间结果兜底提交
+                    if cur and len(response.text) * 2 < len(cur):
+                        parts.append(cur)
+                    cur = response.text
+        if cur:
+            parts.append(cur)
+        return "".join(parts)
     
     async def transcribe_stream(self, audio: Union[str, Path, bytes], *, realtime: bool = False) -> AsyncIterator[ASRResponse]:
         """
@@ -502,12 +521,16 @@ def _parse_response(data: bytes) -> ASRResponse:
 
     results = json_data.get("results")
     extra = json_data.get("extra", {})
+    audio_dur = extra.get("audio_duration", -1)
+    if not isinstance(audio_dur, (int, float)):
+        audio_dur = -1
 
     # 无 results，可能是心跳包
     if results is None:
         return ASRResponse(
             type=ResponseType.HEARTBEAT,
             packet_number=extra.get("packet_number", -1),
+            audio_duration_ms=int(audio_dur),
             raw_json=json_data,
         )
 
@@ -531,13 +554,24 @@ def _parse_response(data: bytes) -> ASRResponse:
         if r.get("extra", {}).get("nonstream_result"):
             nonstream_result = True
 
-    # 最终结果
+    # 最终结果（断句定稿）
     if nonstream_result or (not is_interim and vad_finished):
         return ASRResponse(
             type=ResponseType.FINAL_RESULT,
             text=text,
             is_final=True,
             vad_finished=vad_finished,
+            audio_duration_ms=int(audio_dur),
+            raw_json=json_data,
+        )
+
+    # 两遍解码阶段性确认：is_interim=false 但未断句，之后同句还会继续出中间结果
+    if not is_interim:
+        return ASRResponse(
+            type=ResponseType.TWO_PASS_RESULT,
+            text=text,
+            two_pass=True,
+            audio_duration_ms=int(audio_dur),
             raw_json=json_data,
         )
 
@@ -546,6 +580,7 @@ def _parse_response(data: bytes) -> ASRResponse:
         type=ResponseType.INTERIM_RESULT,
         text=text,
         is_final=False,
+        audio_duration_ms=int(audio_dur),
         raw_json=json_data,
     )
 

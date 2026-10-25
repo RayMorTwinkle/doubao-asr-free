@@ -358,6 +358,16 @@ A：这是 [zhuiyue132/doubao-asr](https://github.com/zhuiyue132/doubao-asr) 的
 - **系统依赖**：`opuslib` 是 ctypes 绑定，必须先装系统 Opus 库（`libopus0`/`opus`），否则 import 即失败。
 - **网络可达性**：依赖 `log.snssdk.com`、`is.snssdk.com` 与 `wss://frontier-audio-ime-ws.doubao.com` 三个端点。
 
+## 🔬 服务端特性实测结论（重要，避免踩坑）
+
+对服务端行为做过系统实测，结论全部有脚本与日志复现支持，详见 **[docs/FINDINGS.md](docs/FINDINGS.md)**。要点：
+
+- **发送速率上限 ~6.4x**：瞬间倾倒大量音频会被 `RST_STREAM` 断流（易误判为"会话时长上限"），匀速 ≤6x 则单会话可稳定吃 10 分钟以上；
+- **服务端时间戳不可靠**（nonstream 结果会 ×2 虚报），可靠进度信号只有 `extra.audio_duration`（现已透出为 `ASRResponse.audio_duration_ms`）；
+- **断句**：`is_interim=false` 不等于断句（新增 `TWO_PASS_RESULT` 类型区分）；`index` 恒为 0 不可用；
+- **空闲/静音宽容**：150s 不发字节、480s 纯静音都会话存活，无需保活；
+- 修复了 `transcribe()` 只返回最后一句 FINAL、丢掉前面所有句子的 bug。
+
 ---
 
 ## 📄 License
