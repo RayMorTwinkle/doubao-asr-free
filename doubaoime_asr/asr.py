@@ -96,29 +96,57 @@ class DoubaoASR:
         """
         非流式语音识别
 
+        合并规则（实测依据见 docs/FINDINGS.md）：
+        - FINAL_RESULT 权威定稿；中间结果的边界信号 = 文本缩水过半，
+          或 start_time 跳升 >1s 且文本变短（服务端会交错推送重叠 utterance）
+        - 空文本 FINAL 忽略（它定稿的是另一段空音频段，当前句还在继续出中间结果）
+        - 同句迟到修订按前缀关系去重
+
         :param audio: 音频文件路径或 PCM 字节数据
         :param on_interim: 可选的中间结果回调
-        :return: 最终识别文本（全部句子合并；FINAL 权威 + 中间结果断句兜底）
+        :return: 最终识别文本（全部句子合并）
         """
         parts: List[str] = []
         cur = ""
+        cur_start: Optional[float] = None
+
+        def _push(text: str) -> None:
+            if not text.strip():
+                return
+            if parts and (parts[-1].startswith(text[:15]) or text.startswith(parts[-1][:15])):
+                if len(text) > len(parts[-1]):
+                    parts[-1] = text
+                return
+            parts.append(text)
+
         async for response in self.transcribe_stream(audio, realtime=realtime):
             if response.type == ResponseType.ERROR:
                 raise ASRError(response.error_msg, response)
             elif response.type == ResponseType.FINAL_RESULT:
                 if response.text:
-                    parts.append(response.text)
-                cur = ""  # 断句定稿（或 VAD 判空），当前句结束
+                    if cur and not (cur[-12:] in response.text or response.text[:12] in cur):
+                        _push(cur)  # 与 FINAL 无关的挂起句：边界漏检残留，先补提交
+                    _push(response.text)
+                    cur = ""
+                    cur_start = None
             elif response.type in (ResponseType.INTERIM_RESULT, ResponseType.TWO_PASS_RESULT):
-                if on_interim and response.type == ResponseType.INTERIM_RESULT:
-                    on_interim(response.text)
                 if response.text:
-                    # 文本长度大幅缩水 = 新句开始，旧句以最后中间结果兜底提交
-                    if cur and len(response.text) * 2 < len(cur):
-                        parts.append(cur)
+                    if on_interim and response.type == ResponseType.INTERIM_RESULT:
+                        on_interim(response.text)
+                    results = (response.raw_json or {}).get("results") or [{}]
+                    st = results[0].get("start_time")
+                    if cur:
+                        if (len(response.text) * 2 < len(cur) or
+                                (st is not None and cur_start is not None
+                                 and st > cur_start + 1.0 and len(response.text) < len(cur))):
+                            _push(cur)
+                            cur = ""
+                            cur_start = None
                     cur = response.text
+                    if st is not None:
+                        cur_start = st
         if cur:
-            parts.append(cur)
+            _push(cur)
         return "".join(parts)
     
     async def transcribe_stream(self, audio: Union[str, Path, bytes], *, realtime: bool = False) -> AsyncIterator[ASRResponse]:
