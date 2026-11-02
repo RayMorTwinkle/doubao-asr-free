@@ -21,7 +21,7 @@
 
 Doubao Input Method's speech recognition is fast and accurate, but **there is no official API**. By analyzing the wire protocol of the Android Doubao IME app (`oime`, `com.bytedance.android.doubaoime`), this project reimplements the client in pure Python: it registers a virtual device, fetches a token, streams Opus audio over a WebSocket + Protobuf binary protocol, and returns transcription text with interim results, VAD events, and punctuation restoration.
 
-> ⚠️ **This repository is a mirror + documentation beautification**: 100% of the code comes from the upstream project [zhuiyue132/doubao-asr](https://github.com/zhuiyue132/doubao-asr). Only the README, architecture diagrams, and the icon were (re)created — no source code was modified. Please follow and star the upstream project first.
+> ⚠️ **This repository is a mirror + documentation beautification**: The initial client was imported from the upstream project [zhuiyue132/doubao-asr](https://github.com/zhuiyue132/doubao-asr). This development branch additionally fixes streaming merging and failure handling; see FINDINGS. Please follow and star the upstream project first.
 >
 > For learning and research only. This is an unofficial interface; the protocol may change or break at any time.
 
@@ -368,10 +368,17 @@ A: This is a mirror import of [zhuiyue132/doubao-asr](https://github.com/zhuiyue
 
 ## 🙏 Credits
 
-- **Upstream author**: [zhuiyue132/doubao-asr](https://github.com/zhuiyue132/doubao-asr) — the protocol analysis, client implementation, and all code belong to that project; this repo is only a mirror + documentation beautification. All credit goes to the upstream author.
+- **Upstream author**: [zhuiyue132/doubao-asr](https://github.com/zhuiyue132/doubao-asr) — the protocol analysis, client implementation, and all code belong to that project; this repo builds on that work with documentation and experiment-driven fixes.
 - The upstream README also mentions [starccy/doubaoime-asr](https://github.com/starccy/doubaoime-asr) as its install source — thanks as well.
 - The demo audio comes from [liangstein/Chinese-speech-to-text](https://github.com/liangstein/Chinese-speech-to-text).
 
 <div align="center">
 <sub>doubao-asr-free · put Doubao IME's ears inside your Python scripts</sub>
 </div>
+
+
+## Experimental streaming fixes (local development branch)
+
+This branch includes a shared streaming revision merger, sender/receiver failure handling, and self-contained offline regressions. Server consumption is not a durable transcript checkpoint. Empty finals must not discard other pending text; abnormal EOF must not silently become a complete reference.
+
+Run `python -m unittest discover -s tests -v` and capture your own 16 kHz mono s16 WAV with `python examples/inspect_stream.py input.wav --log capture.jsonl`. No private audio or credentials are bundled. See [FINDINGS](docs/FINDINGS.md) for observations and their limits. These changes have not been published as a release.

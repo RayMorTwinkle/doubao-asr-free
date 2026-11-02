@@ -21,7 +21,7 @@
 
 豆包输入法的语音识别又快又准，但官方**没有开放 API**。本项目通过分析安卓端豆包输入法（`oime`，`com.bytedance.android.doubaoime`）的通信协议，用纯 Python 复刻了它的识别客户端：自动注册虚拟设备、拿 token、走 WebSocket + Protobuf 二进制协议推 Opus 音频流，拿到带中间结果、VAD 事件和标点恢复的识别文本。
 
-> ⚠️ **本仓库是镜像 + 文档美化仓**：代码 100% 来自上游 [zhuiyue132/doubao-asr](https://github.com/zhuiyue132/doubao-asr)，仅重写 README、补充架构图与图标，未改动任何源码。请优先关注和 Star 上游项目。
+> ⚠️ **本仓库是镜像 + 文档美化仓**：初始代码来自上游 [zhuiyue132/doubao-asr](https://github.com/zhuiyue132/doubao-asr)，初始版本重写 README、补充架构图与图标；当前工作分支另有解析、合并及故障处理修复，详见 FINDINGS。请优先关注和 Star 上游项目。
 >
 > 仅供学习研究；非官方接口，协议随时可能变更失效。
 
@@ -362,11 +362,11 @@ A：这是 [zhuiyue132/doubao-asr](https://github.com/zhuiyue132/doubao-asr) 的
 
 对服务端行为做过系统实测，结论全部有脚本与日志复现支持，详见 **[docs/FINDINGS.md](docs/FINDINGS.md)**。要点：
 
-- **发送速率上限 ~6.4x**：瞬间倾倒大量音频会被 `RST_STREAM` 断流（易误判为"会话时长上限"），匀速 ≤6x 则单会话可稳定吃 10 分钟以上；
-- **服务端时间戳不可靠**（nonstream 结果会 ×2 虚报），可靠进度信号只有 `extra.audio_duration`（现已透出为 `ASRResponse.audio_duration_ms`）；
-- **断句**：`is_interim=false` 不等于断句（新增 `TWO_PASS_RESULT` 类型区分）；`index` 恒为 0 不可用；
-- **空闲/静音宽容**：150s 不发字节、480s 纯静音都会话存活，无需保活；
-- 修复了 `transcribe()` 只返回最后一句 FINAL、丢掉前面所有句子的 bug。
+- 有限样本观察到消费速度约 6.4x，限速发送比瞬间倾倒稳定；这不是服务保证。
+- `audio_duration_ms` 只表示消费进度，不能直接当恢复断点；必须保护尚未落盘的挂起句。
+- 空 FINAL、两遍解码检查点、交错修订和长尾首重叠都有实测记录；全文合并器及发送/接收任务收尾已补回归测试。
+- 原始参考也可能因断流而截断，必须检查输入发完和 SessionFinished。
+- 运行 `python -m unittest discover -s tests -v` 做离线回归；用 `examples/inspect_stream.py` 对自备音频采集原始响应。
 
 ---
 
@@ -378,7 +378,7 @@ A：这是 [zhuiyue132/doubao-asr](https://github.com/zhuiyue132/doubao-asr) 的
 
 ## 🙏 致谢 / Credits
 
-- **上游作者**：[zhuiyue132/doubao-asr](https://github.com/zhuiyue132/doubao-asr) —— 协议分析、客户端实现与全部代码均来自该项目，本仓仅为镜像 + 文档美化。所有功劳归于上游作者。
+- **上游作者**：[zhuiyue132/doubao-asr](https://github.com/zhuiyue132/doubao-asr) —— 协议分析、客户端实现与全部代码均来自该项目，本仓基于其实现补充文档及协议实验驱动的修复。
 - 上游 README 另提及 [starccy/doubaoime-asr](https://github.com/starccy/doubaoime-asr) 作为其安装来源，一并致谢。
 - 示例音频来自 [liangstein/Chinese-speech-to-text](https://github.com/liangstein/Chinese-speech-to-text)。
 
