@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import contextlib
 from dataclasses import dataclass
 from enum import Enum, auto
 import json
@@ -49,14 +48,18 @@ class ASRResponse:
     is_final: bool = False
     vad_start: bool = False
     vad_finished: bool = False
-    # 本条为两遍解码确认文本（尚未断句，文本是该句已确认前缀）
+    # 两遍解码阶段性结果，尚未断句，后续仍可能修订。
     two_pass: bool = False
-    # 服务器已消费音频毫秒数：唯一可靠的进度信号（服务端时间戳不可靠，
-    # 见 docs/FINDINGS.md）；无该字段时为 -1
+    # 服务器已消费音频毫秒数，仅用于进度观察，不能当文字持久化断点；缺失为 -1。
     audio_duration_ms: int = -1
     packet_number: int = -1
     error_msg: str = ""
     raw_json: Optional[dict] = None
+
+    @property
+    def result_items(self):
+        """All unflattened per-result records, including protocol association fields."""
+        return (self.raw_json or {}).get('results') or []
 
 
 class ASRError(Exception):
@@ -100,55 +103,28 @@ class DoubaoASR:
         - FINAL_RESULT 权威定稿；中间结果的边界信号 = 文本缩水过半，
           或 start_time 跳升 >1s 且文本变短（服务端会交错推送重叠 utterance）
         - 空文本 FINAL 忽略（它定稿的是另一段空音频段，当前句还在继续出中间结果）
-        - 同句迟到修订按前缀关系去重
+        - 共享 StreamingMerger 修订已有句子，并保留较后源位置的真实重复
 
         :param audio: 音频文件路径或 PCM 字节数据
         :param on_interim: 可选的中间结果回调
         :return: 最终识别文本（全部句子合并）
         """
-        parts: List[str] = []
-        cur = ""
-        cur_start: Optional[float] = None
-
-        def _push(text: str) -> None:
-            if not text.strip():
-                return
-            if parts and (parts[-1].startswith(text[:15]) or text.startswith(parts[-1][:15])):
-                if len(text) > len(parts[-1]):
-                    parts[-1] = text
-                return
-            parts.append(text)
-
+        from .merge import StreamingMerger
+        merger = StreamingMerger()
         async for response in self.transcribe_stream(audio, realtime=realtime):
             if response.type == ResponseType.ERROR:
                 raise ASRError(response.error_msg, response)
-            elif response.type == ResponseType.FINAL_RESULT:
-                if response.text:
-                    if cur and not (cur[-12:] in response.text or response.text[:12] in cur):
-                        _push(cur)  # 与 FINAL 无关的挂起句：边界漏检残留，先补提交
-                    _push(response.text)
-                    cur = ""
-                    cur_start = None
-            elif response.type in (ResponseType.INTERIM_RESULT, ResponseType.TWO_PASS_RESULT):
-                if response.text:
-                    if on_interim and response.type == ResponseType.INTERIM_RESULT:
-                        on_interim(response.text)
-                    results = (response.raw_json or {}).get("results") or [{}]
-                    st = results[0].get("start_time")
-                    if cur:
-                        if (len(response.text) * 2 < len(cur) or
-                                (st is not None and cur_start is not None
-                                 and st > cur_start + 1.0 and len(response.text) < len(cur))):
-                            _push(cur)
-                            cur = ""
-                            cur_start = None
-                    cur = response.text
-                    if st is not None:
-                        cur_start = st
-        if cur:
-            _push(cur)
-        return "".join(parts)
-    
+            if response.type in (ResponseType.INTERIM_RESULT, ResponseType.TWO_PASS_RESULT,
+                                 ResponseType.FINAL_RESULT):
+                if on_interim and response.text and response.type == ResponseType.INTERIM_RESULT:
+                    on_interim(response.text)
+                raw = response.raw_json or {}
+                duration = (raw.get("extra") or {}).get("audio_duration", 0)
+                merger.accept_response(response,audio_ms=duration)
+        if merger.conflicts:
+            raise ASRError(f"{len(merger.conflicts)} 条识别更新无法可靠关联；请使用流式接口保存原始结果并核对")
+        return merger.text()
+
     async def transcribe_stream(self, audio: Union[str, Path, bytes], *, realtime: bool = False) -> AsyncIterator[ASRResponse]:
         """
         流式语音识别（完整音频）
@@ -188,36 +164,8 @@ class DoubaoASR:
                     self._receive_responses(ws, state, response_queue)
                 )
 
-                try:
-                    # 从队列中获取服务器响应
-                    while True:
-                        try:
-                            resp = await asyncio.wait_for(
-                                response_queue.get(),
-                                timeout=self.config.recv_timeout,
-                            )
-                            if resp is None: # 结束标记
-                                break
-
-                            # 心跳包仅用于重置超时，不转发给用户
-                            if resp.type == ResponseType.HEARTBEAT:
-                                continue
-
-                            yield resp
-                            if resp.type == ResponseType.ERROR:
-                                break
-
-                        except asyncio.TimeoutError:
-                            break
-
-                    await send_task
-                finally:
-                    send_task.cancel()
-                    recv_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await send_task
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await recv_task
+                async for resp in self._task_responses(send_task, recv_task, response_queue):
+                    yield resp
 
         except websockets.exceptions.WebSocketException as e:
             raise ASRError(f"WebSocket 错误: {e}") from e
@@ -258,31 +206,44 @@ class DoubaoASR:
                     self._receive_responses(ws, state, response_queue)
                 )
 
-                try:
-                    # 实时模式不使用超时，依靠 WebSocket 层检测断开
-                    while True:
-                        resp = await response_queue.get()
-                        if resp is None:
-                            break
-
-                        if resp.type == ResponseType.HEARTBEAT:
-                            continue
-
-                        yield resp
-                        if resp.type == ResponseType.ERROR:
-                            break
-
-                    await send_task
-                finally:
-                    send_task.cancel()
-                    recv_task.cancel()
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await send_task
-                    with contextlib.suppress(asyncio.CancelledError):
-                        await recv_task
+                async for resp in self._task_responses(send_task, recv_task, response_queue):
+                    yield resp
 
         except websockets.exceptions.WebSocketException as e:
             raise ASRError(f"WebSocket 错误: {e}") from e
+
+    async def _task_responses(self, send_task, recv_task, queue):
+        finished_at = None
+        clean = False
+        try:
+            while True:
+                if send_task.done():
+                    # Failed sources and encoders must not hang a live receiver.
+                    send_task.result()
+                    if finished_at is None:
+                        finished_at = time.monotonic()
+                    if time.monotonic()-finished_at > self.config.recv_timeout:
+                        raise ASRError("FinishSession 后等待最终结果超时")
+                try:
+                    resp = await asyncio.wait_for(queue.get(), timeout=0.5)
+                except asyncio.TimeoutError:
+                    continue
+                if resp is None:
+                    if not clean:
+                        yield ASRResponse(type=ResponseType.ERROR,
+                            error_msg="连接在 SessionFinished 前结束，结果可能不完整")
+                    break
+                if resp.type == ResponseType.HEARTBEAT:
+                    continue
+                if resp.type == ResponseType.SESSION_FINISHED:
+                    clean = True
+                yield resp
+                if resp.type == ResponseType.ERROR:
+                    break
+        finally:
+            send_task.cancel()
+            recv_task.cancel()
+            await asyncio.gather(send_task, recv_task, return_exceptions=True)
 
     async def _send_audio_realtime(
         self,
@@ -372,7 +333,7 @@ class DoubaoASR:
 
         # StartTask
         await ws.send(_build_start_task(state.request_id, token))
-        resp = await ws.recv()
+        resp = await asyncio.wait_for(ws.recv(), timeout=self.config.connect_timeout)
         parsed = _parse_response(resp)
         if parsed.type == ResponseType.ERROR:
             raise ASRError(f'StartTask 失败：{parsed.error_msg}', parsed)
@@ -382,7 +343,7 @@ class DoubaoASR:
         await ws.send(
             _build_start_session(state.request_id, token, self.config.session_config())
         )
-        resp = await ws.recv()
+        resp = await asyncio.wait_for(ws.recv(), timeout=self.config.connect_timeout)
         parsed = _parse_response(resp)
         if parsed.type == ResponseType.ERROR:
             raise ASRError(f'StartSession 失败：{parsed.error_msg}', parsed)
@@ -460,6 +421,10 @@ class DoubaoASR:
 
         except websockets.exceptions.ConnectionClosed:
             state.is_finished = True
+        except Exception as error:
+            state.is_finished = True
+            await queue.put(ASRResponse(type=ResponseType.ERROR,
+                error_msg=f"接收或解析响应失败: {type(error).__name__}: {error}"))
         finally:
             # 结束信号
             await queue.put(None)
@@ -483,7 +448,7 @@ def _build_start_session(request_id: str, token: str, config: SessionConfig) -> 
     request.service_name = "ASR"
     request.method_name = "StartSession"
     request.request_id = request_id
-    request.payload = config.model_dump_json()
+    request.payload = config.model_dump_json(exclude_none=True)
     return request.SerializeToString()
 
 

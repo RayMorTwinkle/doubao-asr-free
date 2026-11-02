@@ -21,6 +21,8 @@ class _SessionExtraConfig(BaseModel):
     enable_asr_threepass: bool
     enable_asr_twopass: bool
     input_mode: str
+    strong_ddc: Optional[bool] = None
+    use_twopass_retry: Optional[bool] = None
 
 
 class SessionConfig(BaseModel):
@@ -78,6 +80,9 @@ class ASRConfig:
     enable_speech_rejection: bool = False
     enable_asr_twopass: bool = True
     enable_asr_threepass: bool = True
+    input_mode: str = "tool"
+    strong_ddc: Optional[bool] = None
+    use_twopass_retry: Optional[bool] = None
     # 这里是输入法当前作用在哪个应用上
     # 可能服务器会根据当前所使用的程序调整不同的语音识别策略？？
     # 这里用 Chrome 浏览器，算是比较通用的了吧？
@@ -203,7 +208,9 @@ class ASRConfig:
             did=self.device_id,
             enable_asr_threepass=self.enable_asr_threepass,
             enable_asr_twopass=self.enable_asr_twopass,
-            input_mode="tool",
+            input_mode=self.input_mode,
+            strong_ddc=self.strong_ddc,
+            use_twopass_retry=self.use_twopass_retry,
         )
 
         return SessionConfig(
